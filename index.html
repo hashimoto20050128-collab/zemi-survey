@@ -113,7 +113,7 @@ function rollCandy() {
   const r = Math.random();
   if (r < 0.52) return { type: "treat", delta: 1 + (Math.random() * 3 | 0) };
   if (r < 0.74) return { type: "steal", delta: -(1 + (Math.random() * 2 | 0)) };
-  const si = Math.random() < 0.18 ? SCARE_SUPER : Math.random() * SCARE_SUPER | 0;
+  const si = Math.random() < 0.3 ? SCARE_SUPER : Math.random() * SCARE_SUPER | 0;
   return { type: "scare", si, delta: 0 };
 }
 function qTypeName(q) {
