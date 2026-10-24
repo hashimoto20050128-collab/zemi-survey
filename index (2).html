@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Trick or Survey 🎃 ハロウィン・ライブアンケート</title>
+<link rel="icon" href="data:," />
+<style>html,body{margin:0;padding:0;background:#190a2e;}#root{min-height:100vh;}</style>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyAGUT2bcO1AwbvvF41qMT1sktvhDzcwGNg",
+  authDomain: "zemi-survey-13056.firebaseapp.com",
+  databaseURL: "https://zemi-survey-13056-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "zemi-survey-13056",
+  storageBucket: "zemi-survey-13056.firebasestorage.app",
+  messagingSenderId: "579807228715",
+  appId: "1:579807228715:web:f00cbc1645ddaf7ff9cb6e"
+};
+</script>
+<script>
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const firebaseConfig = window.__FIREBASE_CONFIG__ || {};
+const CONFIG_OK = !!(firebaseConfig.databaseURL && !/REPLACE_ME/.test(firebaseConfig.databaseURL));
+let db = null;
+if (CONFIG_OK) {
+  try {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.database();
+  } catch (e) {
+    console.error("Firebase init failed", e);
+  }
+}
+const uid = () => Math.random().toString(36).slice(2, 10);
+const clean = (o) => JSON.parse(JSON.stringify(o));
+function emptyConfig() {
+  return { sessionId: uid(), title: "", questions: [], activeIndex: -1, revealResults: true, intermission: false, started: false, ended: false };
+}
+function listenConfig(cb) {
+  if (!db) {
+    cb(null);
+    return () => {
+    };
+  }
+  const r = db.ref("config");
+  const h = r.on("value", (s) => cb(s.val()));
+  return () => r.off("value", h);
+}
+function writeConfig(next) {
+  if (db) db.ref("config").set(clean(next));
+}
+function normalizeVotes(obj) {
+  const o = obj || {};
+  return Object.keys(o).map((k) => o[k]).map((x) => x && typeof x === "object" && "a" in x ? { a: x.a, n: x.n || "", av: x.av || "" } : { a: x, n: "", av: "" }).filter((x) => x.a !== null && x.a !== void 0);
+}
+function listenVotes(sid, qi, cb) {
+  if (!db) {
+    cb([]);
+    return () => {
+    };
+  }
+  const r = db.ref("votes/" + sid + "/" + qi);
+  const h = r.on("value", (s) => cb(normalizeVotes(s.val())));
+  return () => r.off("value", h);
+}
+function writeVote(sid, qi, pid, val) {
+  if (db) db.ref("votes/" + sid + "/" + qi + "/" + pid).set(clean(val));
+}
+async function fetchAllVotes(sid) {
+  if (!db) return {};
+  const snap = await db.ref("votes/" + sid).get();
+  const val = snap.val() || {};
+  const out = {};
+  Object.keys(val).forEach((qi) => {
+    out[qi] = normalizeVotes(val[qi]);
+  });
+  return out;
+}
+function listenCandy(sid, cb) {
+  if (!db) {
+    cb([]);
+    return () => {
+    };
+  }
+  const r = db.ref("candy/" + sid);
+  const h = r.on("value", (s) => {
+    const o = s.val() || {};
+    cb(Object.keys(o).map((k) => o[k]).filter((x) => x && typeof x === "object"));
+  });
+  return () => r.off("value", h);
+}
+function writeCandy(sid, pid, data) {
+  if (db) db.ref("candy/" + sid + "/" + pid).set(clean(data));
+}
+const SCARES = [
+  { face: "👻", text: "BOO!", sub: "びっくりした？🦇", cls: "s-boo" },
+  { face: "🕷️", text: "ギャアッ！", sub: "クモの大群だ…！", cls: "s-spider", rain: "🕷️" },
+  { face: "🧟", text: "ゾンビだ！", sub: "かまれる前に逃げて！", cls: "s-zombie", rain: "🧟" },
+  { face: "👁️", text: "見ているぞ…", sub: "無数の視線を感じる", cls: "s-eyes", rain: "👁️" },
+  { face: "💀", text: "シーッ…", sub: "後ろに…誰か立ってる", cls: "s-skull" },
+  { face: "🩸", text: "血の雨", sub: "ポタ…ポタ…ポタ…", cls: "s-blood", rain: "🩸" },
+  { face: "😱", text: "ギャァァァ！！", sub: "うしろ‼ 逃げてェェ‼", cls: "s-super", rain: "👹" }
+  // 最恐
+];
+const SCARE_SUPER = SCARES.length - 1;
+function rollCandy() {
+  const r = Math.random();
+  if (r < 0.52) return { type: "treat", delta: 1 + (Math.random() * 3 | 0) };
+  if (r < 0.74) return { type: "steal", delta: -(1 + (Math.random() * 2 | 0)) };
+  const si = Math.random() < 0.18 ? SCARE_SUPER : Math.random() * SCARE_SUPER | 0;
+  return { type: "scare", si, delta: 0 };
+}
+function qTypeName(q) {
+  return q.type === "choice" ? "選択式" : q.type === "scale" ? "段階評価" : "自由記述";
+}
+function answerToText(q, a) {
+  if (q.type === "choice") return q.options && q.options[a] != null ? q.options[a] : String(a);
+  return String(a);
+}
+function csvEscape(s) {
+  const t = String(s == null ? "" : s);
+  return /[",\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+function downloadResultsCSV(config, all) {
+  const rows = [["設問No", "設問", "種別", "ニックネーム", "回答"]];
+  (config.questions || []).forEach((q, i) => {
+    const list = all[i] || [];
+    if (list.length === 0) rows.push([i + 1, q.text, qTypeName(q), "", "(回答なし)"]);
+    else list.forEach((v) => rows.push([i + 1, q.text, qTypeName(q), v.n || "名無し", answerToText(q, v.a)]));
+  });
+  const csv = "\uFEFF" + rows.map((r) => r.map(csvEscape).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  const base = (config.title ? config.title.replace(/[\\/:*?"<>|]/g, "_").trim() : "") || "trick-or-survey";
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = base + "_" + stamp + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1e3);
+}
+const COSTUMES = ["🎃", "👻", "🦇", "🐱", "🧙", "🧛", "💀", "🕷️"];
+function App() {
+  const [view, setView] = useState("role");
+  const [config, setConfig] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const pidRef = useRef(uid());
+  useEffect(() => {
+    const off = listenConfig((c) => {
+      setConfig(c);
+      setLoading(false);
+    });
+    return off;
+  }, []);
+  const pushConfig = useCallback((next) => {
+    setConfig(next);
+    writeConfig(next);
+  }, []);
+  if (!CONFIG_OK) return /* @__PURE__ */ React.createElement("div", { className: "hw-root" }, /* @__PURE__ */ React.createElement(StyleTag, null), /* @__PURE__ */ React.createElement(ConfigNotice, null));
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-root" }, /* @__PURE__ */ React.createElement(StyleTag, null), /* @__PURE__ */ React.createElement(HalloweenDecor, null), loading ? /* @__PURE__ */ React.createElement(Loading, null) : view === "role" ? /* @__PURE__ */ React.createElement(
+    RoleSelect,
+    {
+      hasPoll: !!(config && config.questions && config.questions.length),
+      title: config && config.title,
+      onHost: () => setView("setup"),
+      onGuest: () => setView("join")
+    }
+  ) : view === "setup" ? /* @__PURE__ */ React.createElement(
+    Setup,
+    {
+      config: config || emptyConfig(),
+      onCancel: () => setView("role"),
+      onSave: (c) => pushConfig(c),
+      onStart: (c) => {
+        pushConfig({ ...c, sessionId: uid(), started: true, activeIndex: -1, intermission: false, ended: false });
+        setView("present");
+      }
+    }
+  ) : view === "present" && config ? /* @__PURE__ */ React.createElement(Presenter, { config, pushConfig, onExit: () => setView("role"), onEdit: () => setView("setup") }) : view === "present" ? /* @__PURE__ */ React.createElement(
+    Setup,
+    {
+      config: config || emptyConfig(),
+      onCancel: () => setView("role"),
+      onSave: (c) => pushConfig(c),
+      onStart: (c) => {
+        pushConfig({ ...c, sessionId: uid(), started: true, activeIndex: -1, intermission: false, ended: false });
+        setView("present");
+      }
+    }
+  ) : /* @__PURE__ */ React.createElement(Participant, { config, pid: pidRef.current, onLeave: () => setView("role") }));
+}
+function HalloweenDecor() {
+  const bats = [0, 1, 2], ghosts = [0, 1], stars = useMemo(() => Array.from({ length: 16 }, () => ({ l: Math.random() * 100, t: Math.random() * 70, d: Math.random() * 3, s: 0.5 + Math.random() })), []);
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-decor", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement("div", { className: "hw-moon" }, "🌕"), stars.map((s, i) => /* @__PURE__ */ React.createElement("span", { key: i, className: "hw-star", style: { left: `${s.l}%`, top: `${s.t}%`, animationDelay: `${s.d}s`, fontSize: `${s.s}em` } }, "✦")), bats.map((i) => /* @__PURE__ */ React.createElement("span", { key: "b" + i, className: "hw-bat", style: { top: `${12 + i * 16}%`, animationDelay: `${-i * 3}s`, animationDuration: `${13 + i * 4}s` } }, "🦇")), ghosts.map((i) => /* @__PURE__ */ React.createElement("span", { key: "g" + i, className: "hw-ghostfloat", style: { left: `${8 + i * 70}%`, bottom: `${6 + i * 4}%`, animationDelay: `${-i * 2}s` } }, "👻")));
+}
+function GhostMascot({ size = 90 }) {
+  return /* @__PURE__ */ React.createElement("svg", { className: "hw-mascot", width: size, height: size, viewBox: "0 0 100 100", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement(
+    "path",
+    {
+      d: "M18 54 C18 28 82 28 82 54 L82 86 C82 90 77 90 74 86 C71 82 67 82 64 86 C61 90 57 90 54 86 C51 82 47 82 44 86 C41 90 37 90 34 86 C31 82 27 82 24 86 C21 90 18 90 18 86 Z",
+      fill: "#F3EEFF",
+      stroke: "#2A1A3E",
+      strokeWidth: "3",
+      strokeLinejoin: "round"
+    }
+  ), /* @__PURE__ */ React.createElement("ellipse", { cx: "39", cy: "54", rx: "6.5", ry: "8", fill: "#2A1A3E" }), /* @__PURE__ */ React.createElement("ellipse", { cx: "61", cy: "54", rx: "6.5", ry: "8", fill: "#2A1A3E" }), /* @__PURE__ */ React.createElement("circle", { cx: "41", cy: "51", r: "2", fill: "#fff" }), /* @__PURE__ */ React.createElement("circle", { cx: "63", cy: "51", r: "2", fill: "#fff" }), /* @__PURE__ */ React.createElement("ellipse", { cx: "30", cy: "66", rx: "5", ry: "3.5", fill: "#FF8FB3", opacity: ".7" }), /* @__PURE__ */ React.createElement("ellipse", { cx: "70", cy: "66", rx: "5", ry: "3.5", fill: "#FF8FB3", opacity: ".7" }), /* @__PURE__ */ React.createElement("path", { d: "M45 64 Q50 70 55 64", fill: "none", stroke: "#2A1A3E", strokeWidth: "2.5", strokeLinecap: "round" }));
+}
+function Loading() {
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-center" }, /* @__PURE__ */ React.createElement("div", { className: "hw-bob" }, /* @__PURE__ */ React.createElement(GhostMascot, { size: 80 })), /* @__PURE__ */ React.createElement("span", { className: "hw-load" }, "LOADING…"));
+}
+function ConfigNotice() {
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-center" }, /* @__PURE__ */ React.createElement("div", { className: "hw-panel", style: { maxWidth: 520 } }, /* @__PURE__ */ React.createElement("div", { className: "hw-eyebrow" }, "SETUP REQUIRED"), /* @__PURE__ */ React.createElement("h2", { className: "hw-h2" }, "Firebaseの設定を入力してください"), /* @__PURE__ */ React.createElement("p", { className: "hw-lead" }, "index.html 内の ", /* @__PURE__ */ React.createElement("code", null, "__FIREBASE_CONFIG__"), " を設定すると起動します。")));
+}
+function RoleSelect({ hasPoll, title, onHost, onGuest }) {
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-center" }, /* @__PURE__ */ React.createElement("div", { className: "hw-hero" }, /* @__PURE__ */ React.createElement("div", { className: "hw-bob hw-hero-ghost" }, /* @__PURE__ */ React.createElement(GhostMascot, { size: 96 })), /* @__PURE__ */ React.createElement("div", { className: "hw-eyebrow" }, "🎃 HALLOWEEN LIVE 👻"), /* @__PURE__ */ React.createElement("h1", { className: "hw-h1" }, "Trick", /* @__PURE__ */ React.createElement("span", { className: "hw-amp" }, " or "), "Survey"), /* @__PURE__ */ React.createElement("p", { className: "hw-lead" }, "スライドに合わせて問いを出題。答えるたびに、お菓子がもらえたり…奪われたり…ときどきBOO！"), hasPoll && title ? /* @__PURE__ */ React.createElement("div", { className: "hw-saved" }, "SAVED — ", /* @__PURE__ */ React.createElement("b", null, title || "Untitled")) : null, /* @__PURE__ */ React.createElement("div", { className: "hw-role-row" }, /* @__PURE__ */ React.createElement("button", { className: "hw-role-card hw-role-host", onClick: onHost }, /* @__PURE__ */ React.createElement("span", { className: "hw-role-emoji" }, "🎃"), /* @__PURE__ */ React.createElement("span", { className: "hw-role-name" }, "発表者"), /* @__PURE__ */ React.createElement("span", { className: "hw-role-desc" }, "問いを準備して進行")), /* @__PURE__ */ React.createElement("button", { className: "hw-role-card hw-role-guest", onClick: onGuest }, /* @__PURE__ */ React.createElement("span", { className: "hw-role-emoji" }, "👻"), /* @__PURE__ */ React.createElement("span", { className: "hw-role-name" }, "参加者"), /* @__PURE__ */ React.createElement("span", { className: "hw-role-desc" }, "この端末で回答"))), /* @__PURE__ */ React.createElement("p", { className: "hw-fine" }, "参加者はURLを開くだけで参加できます。回答は匿名で共有されます。")));
+}
+const QTYPES = [{ id: "choice", label: "選択式", en: "Choice" }, { id: "scale", label: "段階評価", en: "Scale" }, { id: "text", label: "自由記述", en: "Open" }];
+function typeLabel(q) {
+  if (q.type === "choice") return `選択式 · ${(q.options || []).filter(Boolean).length}択`;
+  if (q.type === "scale") return `段階評価 · ${q.scaleMin}–${q.scaleMax}`;
+  return "自由記述";
+}
+function clampInt(v, min, max, fb) {
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? fb : Math.max(min, Math.min(max, n));
+}
+function Setup({ config, onCancel, onSave, onStart }) {
+  const [title, setTitle] = useState(config.title || "");
+  const [questions, setQuestions] = useState(config.questions || []);
+  const [editing, setEditing] = useState(null);
+  const current = { ...config, title, questions };
+  const startDraft = (type) => setEditing(
+    type === "scale" ? { id: uid(), type, text: "", scaleMin: 1, scaleMax: 5, minLabel: "そう思わない", maxLabel: "そう思う" } : type === "choice" ? { id: uid(), type, text: "", options: ["", ""] } : { id: uid(), type, text: "" }
+  );
+  const commitDraft = (q) => {
+    setQuestions((prev) => {
+      const i = prev.findIndex((x) => x.id === q.id);
+      if (i >= 0) {
+        const c = [...prev];
+        c[i] = q;
+        return c;
+      }
+      return [...prev, q];
+    });
+    setEditing(null);
+  };
+  const move = (i, dir) => setQuestions((prev) => {
+    const j = i + dir;
+    if (j < 0 || j >= prev.length) return prev;
+    const c = [...prev];
+    [c[i], c[j]] = [c[j], c[i]];
+    return c;
+  });
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-page" }, /* @__PURE__ */ React.createElement("header", { className: "hw-bar" }, onCancel ? /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onCancel }, "← 戻る") : /* @__PURE__ */ React.createElement("span", null), /* @__PURE__ */ React.createElement("div", { className: "hw-bar-title" }, "🎃 問いの準備"), /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: () => onSave(current), disabled: !questions.length }, "保存")), /* @__PURE__ */ React.createElement("div", { className: "hw-panel" }, /* @__PURE__ */ React.createElement("label", { className: "hw-field" }, /* @__PURE__ */ React.createElement("span", { className: "hw-flabel" }, "タイトル（任意）"), /* @__PURE__ */ React.createElement("input", { className: "hw-input hw-input-lg", value: title, placeholder: "例）ハロウィンアンケート", onChange: (e) => setTitle(e.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "hw-qlist" }, questions.length === 0 && !editing ? /* @__PURE__ */ React.createElement("div", { className: "hw-empty" }, "まだ問いがありません。下のボタンで追加してね🍬") : null, questions.map((q, i) => /* @__PURE__ */ React.createElement("div", { className: "hw-qitem", key: q.id }, /* @__PURE__ */ React.createElement("div", { className: "hw-qno" }, String(i + 1).padStart(2, "0")), /* @__PURE__ */ React.createElement("div", { className: "hw-qbody" }, /* @__PURE__ */ React.createElement("div", { className: "hw-qtxt" }, q.text || /* @__PURE__ */ React.createElement("em", { className: "hw-muted" }, "（未入力）")), /* @__PURE__ */ React.createElement("div", { className: "hw-qmeta" }, typeLabel(q))), /* @__PURE__ */ React.createElement("div", { className: "hw-qacts" }, /* @__PURE__ */ React.createElement("button", { className: "hw-ic", onClick: () => move(i, -1), disabled: i === 0 }, "↑"), /* @__PURE__ */ React.createElement("button", { className: "hw-ic", onClick: () => move(i, 1), disabled: i === questions.length - 1 }, "↓"), /* @__PURE__ */ React.createElement("button", { className: "hw-ic", onClick: () => setEditing(q) }, "✎"), /* @__PURE__ */ React.createElement("button", { className: "hw-ic hw-ic-x", onClick: () => setQuestions((p) => p.filter((x) => x.id !== q.id)) }, "✕"))))), editing ? /* @__PURE__ */ React.createElement(QuestionEditor, { draft: editing, onCancel: () => setEditing(null), onCommit: commitDraft }) : /* @__PURE__ */ React.createElement("div", { className: "hw-add" }, /* @__PURE__ */ React.createElement("span", { className: "hw-add-label" }, "追加"), QTYPES.map((t) => /* @__PURE__ */ React.createElement("button", { key: t.id, className: "hw-chip", onClick: () => startDraft(t.id) }, "+ ", t.label))), /* @__PURE__ */ React.createElement("div", { className: "hw-startbar" }, /* @__PURE__ */ React.createElement("button", { className: "hw-btn hw-btn-xl", disabled: !questions.length || !!editing, onClick: () => onStart(current) }, "🎃 開始する"), /* @__PURE__ */ React.createElement("p", { className: "hw-fine" }, "開始すると新しいセッションが始まり、回答・お菓子がリセットされます。"))));
+}
+function QuestionEditor({ draft, onCancel, onCommit }) {
+  var _a;
+  const [q, setQ] = useState(draft);
+  const set = (patch) => setQ((p) => ({ ...p, ...patch }));
+  const valid = q.text.trim() && (q.type !== "choice" || (q.options || []).filter((o) => o.trim()).length >= 2);
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-editor" }, /* @__PURE__ */ React.createElement("div", { className: "hw-editor-type" }, (_a = QTYPES.find((t) => t.id === q.type)) == null ? void 0 : _a.label), /* @__PURE__ */ React.createElement("textarea", { className: "hw-input hw-textarea", placeholder: "問いを入力", value: q.text, onChange: (e) => set({ text: e.target.value }), rows: 2, autoFocus: true }), q.type === "choice" && /* @__PURE__ */ React.createElement("div", { className: "hw-opts" }, (q.options || []).map((opt, i) => /* @__PURE__ */ React.createElement("div", { className: "hw-opt", key: i }, /* @__PURE__ */ React.createElement("span", { className: "hw-mark" }, String.fromCharCode(65 + i)), /* @__PURE__ */ React.createElement("input", { className: "hw-input", placeholder: `選択肢 ${i + 1}`, value: opt, onChange: (e) => {
+    const o = [...q.options];
+    o[i] = e.target.value;
+    set({ options: o });
+  } }), q.options.length > 2 && /* @__PURE__ */ React.createElement("button", { className: "hw-ic hw-ic-x", onClick: () => set({ options: q.options.filter((_, j) => j !== i) }) }, "✕"))), q.options.length < 8 && /* @__PURE__ */ React.createElement("button", { className: "hw-chip hw-chip-ghost", onClick: () => set({ options: [...q.options, ""] }) }, "+ 選択肢を追加")), q.type === "scale" && /* @__PURE__ */ React.createElement("div", { className: "hw-scalecfg" }, /* @__PURE__ */ React.createElement("div", { className: "hw-scalerange" }, /* @__PURE__ */ React.createElement("label", null, "MIN", /* @__PURE__ */ React.createElement("input", { className: "hw-input hw-input-num", type: "number", value: q.scaleMin, onChange: (e) => set({ scaleMin: clampInt(e.target.value, 0, 9, 1) }) })), /* @__PURE__ */ React.createElement("label", null, "MAX", /* @__PURE__ */ React.createElement("input", { className: "hw-input hw-input-num", type: "number", value: q.scaleMax, onChange: (e) => set({ scaleMax: clampInt(e.target.value, 2, 10, 5) }) }))), /* @__PURE__ */ React.createElement("label", { className: "hw-field" }, /* @__PURE__ */ React.createElement("span", { className: "hw-flabel" }, "左端ラベル"), /* @__PURE__ */ React.createElement("input", { className: "hw-input", value: q.minLabel || "", onChange: (e) => set({ minLabel: e.target.value }) })), /* @__PURE__ */ React.createElement("label", { className: "hw-field" }, /* @__PURE__ */ React.createElement("span", { className: "hw-flabel" }, "右端ラベル"), /* @__PURE__ */ React.createElement("input", { className: "hw-input", value: q.maxLabel || "", onChange: (e) => set({ maxLabel: e.target.value }) }))), /* @__PURE__ */ React.createElement("div", { className: "hw-editor-foot" }, /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onCancel }, "キャンセル"), /* @__PURE__ */ React.createElement("button", { className: "hw-btn", disabled: !valid, onClick: () => onCommit({ ...q, options: q.options ? q.options.filter((o) => o.trim()) : void 0 }) }, "この問いを保存")));
+}
+function Presenter({ config, pushConfig, onExit, onEdit }) {
+  const [votes, setVotes] = useState([]);
+  const [candy, setCandy] = useState([]);
+  const [exporting, setExporting] = useState(false);
+  const qs = config.questions || [];
+  const ai = config.activeIndex;
+  const q = ai >= 0 && ai < qs.length ? qs[ai] : null;
+  useEffect(() => {
+    if (ai < 0) {
+      setVotes([]);
+      return;
+    }
+    return listenVotes(config.sessionId, ai, setVotes);
+  }, [ai, config.sessionId]);
+  useEffect(() => {
+    return listenCandy(config.sessionId, setCandy);
+  }, [config.sessionId]);
+  const handleDownload = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const all = await fetchAllVotes(config.sessionId);
+      downloadResultsCSV(config, all);
+    } catch (e) {
+      console.error(e);
+      alert("ダウンロードに失敗しました。");
+    } finally {
+      setExporting(false);
+    }
+  };
+  const inter = !!config.intermission;
+  const ended = !!config.ended;
+  const isLast = ai >= qs.length - 1;
+  const kickoff = () => pushConfig({ ...config, activeIndex: 0, intermission: false, ended: false });
+  const stageNext = () => pushConfig({ ...config, activeIndex: ai + 1, intermission: true });
+  const reveal = () => pushConfig({ ...config, intermission: false });
+  const prev = () => pushConfig({ ...config, activeIndex: Math.max(0, ai - 1), intermission: false });
+  const fullTime = () => pushConfig({ ...config, activeIndex: -1, intermission: false, ended: true });
+  const backToStandby = () => pushConfig({ ...config, activeIndex: -1, intermission: false, ended: false });
+  const jumpTo = (i) => pushConfig({ ...config, activeIndex: i, intermission: false, ended: false });
+  const toggleReveal = () => pushConfig({ ...config, revealResults: !config.revealResults });
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-stage-wrap" }, /* @__PURE__ */ React.createElement("header", { className: "hw-stage-top" }, /* @__PURE__ */ React.createElement("div", { className: "hw-st-left" }, /* @__PURE__ */ React.createElement("span", { className: "hw-live" }, /* @__PURE__ */ React.createElement("i", { className: "hw-dot" }), "LIVE"), /* @__PURE__ */ React.createElement("span", { className: "hw-st-q" }, ended ? "FINISHED" : ai < 0 ? "WARM-UP" : /* @__PURE__ */ React.createElement(React.Fragment, null, "Q.", /* @__PURE__ */ React.createElement("b", null, String(ai + 1).padStart(2, "0")), /* @__PURE__ */ React.createElement("span", { className: "hw-slash" }, "/"), String(qs.length).padStart(2, "0")))), /* @__PURE__ */ React.createElement("div", { className: "hw-st-right" }, /* @__PURE__ */ React.createElement("span", { className: "hw-resp" }, /* @__PURE__ */ React.createElement("b", null, votes.length), " 回答"), /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: handleDownload, disabled: exporting }, exporting ? "…" : "⬇ CSV"), /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onEdit }, "EDIT"), /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onExit }, "EXIT"))), /* @__PURE__ */ React.createElement("main", { className: "hw-stage" }, ended ? /* @__PURE__ */ React.createElement(FinalRanking, { candy, big: true }) : ai < 0 ? /* @__PURE__ */ React.createElement(PresenterStandby, { qs, onPick: jumpTo, candy }) : inter ? /* @__PURE__ */ React.createElement(Interstitial, { nextNo: ai + 1, total: qs.length }) : /* @__PURE__ */ React.createElement("div", { className: "hw-stage-q", key: ai }, /* @__PURE__ */ React.createElement("div", { className: "hw-stage-qtext" }, q.text), /* @__PURE__ */ React.createElement(Results, { q, votes, big: true }))), !ended && /* @__PURE__ */ React.createElement("aside", { className: "hw-candybar" }, /* @__PURE__ */ React.createElement(CandyRanking, { candy, compact: true })), /* @__PURE__ */ React.createElement("footer", { className: "hw-controls" }, ended ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { flex: 1 } }), /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl", onClick: backToStandby }, "← 待機画面へ"), /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl hw-ctrl-go", onClick: kickoff }, "もう一度 🎃")) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl", onClick: prev, disabled: ai < 0 || ai === 0 && !inter }, "← 戻る"), /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl hw-ctrl-toggle", "data-on": config.revealResults, onClick: toggleReveal }, config.revealResults ? "結果を表示中 👁" : "結果は伏せ中 🙈"), ai < 0 ? /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl hw-ctrl-go", onClick: kickoff }, "🎃 開始") : inter ? /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl hw-ctrl-go", onClick: reveal }, "この問いを表示 ▶") : isLast ? /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl hw-ctrl-end", onClick: fullTime }, "おしまい 🍬") : /* @__PURE__ */ React.createElement("button", { className: "hw-ctrl hw-ctrl-go", onClick: stageNext }, "次へ →"))));
+}
+function PresenterStandby({ qs, onPick, candy }) {
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-standby" }, /* @__PURE__ */ React.createElement("div", { className: "hw-standby-msg" }, /* @__PURE__ */ React.createElement("div", { className: "hw-bob" }, /* @__PURE__ */ React.createElement(GhostMascot, { size: 70 })), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "hw-eyebrow" }, "READY?"), /* @__PURE__ */ React.createElement("h2", { className: "hw-h2" }, "準備ができたら、問いを選んで開始🎃"), /* @__PURE__ */ React.createElement("p", { className: "hw-muted-l" }, "「開始」でも進みます。"))), /* @__PURE__ */ React.createElement("div", { className: "hw-standby-cols" }, /* @__PURE__ */ React.createElement("div", { className: "hw-lineup" }, qs.map((q, i) => /* @__PURE__ */ React.createElement("button", { className: "hw-lineup-item", key: q.id, onClick: () => onPick(i) }, /* @__PURE__ */ React.createElement("span", { className: "hw-qno" }, String(i + 1).padStart(2, "0")), /* @__PURE__ */ React.createElement("span", { className: "hw-lineup-text" }, q.text), /* @__PURE__ */ React.createElement("span", { className: "hw-lineup-type" }, typeLabel(q))))), /* @__PURE__ */ React.createElement("div", { className: "hw-rank-panel" }, /* @__PURE__ */ React.createElement("div", { className: "hw-rank-title" }, "🍬 お菓子ランキング"), /* @__PURE__ */ React.createElement(CandyRanking, { candy }))));
+}
+function CandyRanking({ candy, compact, mePid }) {
+  const sorted = [...candy].sort((a, b) => (b.c || 0) - (a.c || 0)).slice(0, compact ? 5 : 12);
+  if (!sorted.length) return /* @__PURE__ */ React.createElement("div", { className: "hw-rank-empty" }, compact ? "🍬 —" : "まだお菓子を集めた人がいません");
+  if (compact) return /* @__PURE__ */ React.createElement("div", { className: "hw-rank-compact" }, sorted.map((p, i) => /* @__PURE__ */ React.createElement("span", { key: i, className: "hw-rank-chip" }, p.av || "👻", " ", p.n, /* @__PURE__ */ React.createElement("b", null, p.c))));
+  const medal = (i) => i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1;
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-rank-list" }, sorted.map((p, i) => /* @__PURE__ */ React.createElement("div", { className: `hw-rank-row ${p.pid && p.pid === mePid ? "me" : ""} ${i < 3 ? "top" : ""}`, key: i }, /* @__PURE__ */ React.createElement("span", { className: "hw-rank-no" }, medal(i)), /* @__PURE__ */ React.createElement("span", { className: "hw-rank-av" }, p.av || "👻"), /* @__PURE__ */ React.createElement("span", { className: "hw-rank-name" }, p.n || "名無し"), /* @__PURE__ */ React.createElement("span", { className: "hw-rank-c" }, p.c, " 🍬"))));
+}
+function FinalRanking({ candy, big, mePid }) {
+  const sorted = [...candy].sort((a, b) => (b.c || 0) - (a.c || 0));
+  const top3 = sorted.slice(0, 3);
+  const order = [1, 0, 2];
+  const myRank = mePid ? sorted.findIndex((p) => p.pid === mePid) + 1 : 0;
+  const me = mePid ? sorted.find((p) => p.pid === mePid) : null;
+  return /* @__PURE__ */ React.createElement("div", { className: `hw-final ${big ? "hw-final-big" : ""}` }, /* @__PURE__ */ React.createElement("div", { className: "hw-final-head" }, /* @__PURE__ */ React.createElement("span", { className: "hw-final-crown" }, "👑"), /* @__PURE__ */ React.createElement("h2", { className: "hw-final-title" }, "お菓子ランキング発表！"), /* @__PURE__ */ React.createElement("span", { className: "hw-final-pumpkin" }, "🎃")), top3.length ? /* @__PURE__ */ React.createElement("div", { className: "hw-podium" }, order.map((idx) => {
+    const p = top3[idx];
+    if (!p) return /* @__PURE__ */ React.createElement("div", { key: idx, className: "hw-podium-col empty" });
+    const rank = idx + 1;
+    return /* @__PURE__ */ React.createElement("div", { key: idx, className: `hw-podium-col r${rank} ${p.pid && p.pid === mePid ? "me" : ""}` }, rank === 1 && /* @__PURE__ */ React.createElement("span", { className: "hw-podium-crown" }, "👑"), /* @__PURE__ */ React.createElement("span", { className: "hw-podium-av" }, p.av || "👻"), /* @__PURE__ */ React.createElement("span", { className: "hw-podium-name" }, p.n || "名無し"), /* @__PURE__ */ React.createElement("div", { className: "hw-podium-bar" }, /* @__PURE__ */ React.createElement("span", { className: "hw-podium-rank" }, rank)), /* @__PURE__ */ React.createElement("span", { className: "hw-podium-c" }, p.c || 0, " 🍬"));
+  })) : /* @__PURE__ */ React.createElement("div", { className: "hw-rank-empty" }, "まだお菓子を集めた人がいません"), sorted.length > 3 && /* @__PURE__ */ React.createElement("div", { className: "hw-final-rest" }, /* @__PURE__ */ React.createElement(CandyRanking, { candy: sorted.slice(3), mePid })), me && myRank > 0 && /* @__PURE__ */ React.createElement("div", { className: "hw-final-me" }, "あなたは ", /* @__PURE__ */ React.createElement("b", null, myRank, "位"), " ・ ", me.c || 0, "🍬 でした！", myRank === 1 ? " 🏆最高！" : " おつかれさま🍬"));
+}
+function Interstitial({ nextNo, total }) {
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-inter" }, /* @__PURE__ */ React.createElement("div", { className: "hw-cauldron" }, /* @__PURE__ */ React.createElement("span", { className: "hw-cauldron-pot" }, "🪄"), /* @__PURE__ */ React.createElement("span", { className: "hw-bubble b1" }), /* @__PURE__ */ React.createElement("span", { className: "hw-bubble b2" }), /* @__PURE__ */ React.createElement("span", { className: "hw-bubble b3" })), /* @__PURE__ */ React.createElement("div", { className: "hw-eyebrow" }, "NEXT"), /* @__PURE__ */ React.createElement("div", { className: "hw-inter-no" }, "Q.", String(nextNo).padStart(2, "0"), /* @__PURE__ */ React.createElement("span", null, " / ", String(total).padStart(2, "0"))), /* @__PURE__ */ React.createElement("p", { className: "hw-inter-msg" }, "次の問いを召喚中…🔮"), /* @__PURE__ */ React.createElement("div", { className: "hw-dots" }, /* @__PURE__ */ React.createElement("i", null), /* @__PURE__ */ React.createElement("i", null), /* @__PURE__ */ React.createElement("i", null)));
+}
+const CHEERS = ["Trick or Treat！", "お菓子はいかが？🍬", "準備はいい？👻", "こわくないよ…たぶん🦇"];
+function Participant({ config, pid, onLeave }) {
+  const [nickname, setNickname] = useState("");
+  const [nameDraft, setNameDraft] = useState("");
+  const [costume, setCostume] = useState("");
+  const [costumeDraft, setCostumeDraft] = useState("");
+  const [textDraft, setTextDraft] = useState("");
+  const [votes, setVotes] = useState([]);
+  const [myVote, setMyVote] = useState(void 0);
+  const [editing, setEditing] = useState(false);
+  const [candyEvent, setCandyEvent] = useState(null);
+  const [myCandy, setMyCandy] = useState(0);
+  const [candy, setCandy] = useState([]);
+  const [cheer, setCheer] = useState(0);
+  const candyRef = useRef(0);
+  const scoredRef = useRef(/* @__PURE__ */ new Set());
+  const ai = config ? config.activeIndex : -1;
+  const qs = config ? config.questions || [] : [];
+  const q = ai >= 0 && ai < qs.length ? qs[ai] : null;
+  const sid = config ? config.sessionId : "";
+  useEffect(() => {
+    const t = setInterval(() => setCheer((c) => (c + 1) % CHEERS.length), 2600);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    if (!sid || ai < 0) {
+      setMyVote(void 0);
+      return;
+    }
+    const r = db ? db.ref("votes/" + sid + "/" + ai + "/" + pid) : null;
+    if (!r) return;
+    const h = r.on("value", (s) => {
+      const v = s.val();
+      setMyVote(v && typeof v === "object" ? v.a : v == null ? void 0 : v);
+    });
+    return () => r.off("value", h);
+  }, [sid, ai, pid]);
+  useEffect(() => {
+    setEditing(false);
+    setTextDraft("");
+  }, [ai, sid]);
+  useEffect(() => {
+    if (!config || !config.revealResults || ai < 0) {
+      setVotes([]);
+      return;
+    }
+    return listenVotes(sid, ai, setVotes);
+  }, [config && config.revealResults, ai, sid]);
+  useEffect(() => {
+    if (!sid) return;
+    return listenCandy(sid, setCandy);
+  }, [sid]);
+  const submit = (value) => {
+    if (!scoredRef.current.has(ai)) {
+      scoredRef.current.add(ai);
+      const ev = rollCandy();
+      const cur = candyRef.current;
+      const nc = ev.delta ? Math.max(0, cur + ev.delta) : cur;
+      candyRef.current = nc;
+      setMyCandy(nc);
+      writeCandy(sid, pid, { n: nickname, av: costume, c: nc, pid });
+      setCandyEvent({ ...ev, key: Date.now() });
+      const dur = ev.type === "scare" ? ev.si === SCARE_SUPER ? 2300 : 1800 : 2e3;
+      setTimeout(() => setCandyEvent(null), dur);
+    }
+    setEditing(false);
+    writeVote(sid, ai, pid, { a: value, n: nickname, av: costume });
+  };
+  const enterEdit = () => {
+    setEditing(true);
+    if (q && q.type === "text") setTextDraft(String(myVote == null ? "" : myVote));
+  };
+  if (!config) return /* @__PURE__ */ React.createElement(Loading, null);
+  if (!nickname || !costume) {
+    const can = nameDraft.trim().length > 0 && !!costumeDraft;
+    const register = () => {
+      const n = nameDraft.trim().slice(0, 16);
+      if (n && costumeDraft) {
+        setNickname(n);
+        setCostume(costumeDraft);
+      }
+    };
+    return /* @__PURE__ */ React.createElement("div", { className: "hw-join" }, /* @__PURE__ */ React.createElement(ParticipantTop, { title: config.title, onLeave }), /* @__PURE__ */ React.createElement("div", { className: "hw-join-body" }, /* @__PURE__ */ React.createElement("div", { className: "hw-reg" }, /* @__PURE__ */ React.createElement("div", { className: "hw-reg-av" }, costumeDraft || "🎭"), /* @__PURE__ */ React.createElement("div", { className: "hw-eyebrow" }, "受付 · CHECK-IN"), /* @__PURE__ */ React.createElement("h2", { className: "hw-qtext" }, "ニックネームとコスチュームを選ぼう"), /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        className: "hw-input hw-input-lg hw-reg-input",
+        value: nameDraft,
+        maxLength: 16,
+        placeholder: "例）ニックネーム",
+        onChange: (e) => setNameDraft(e.target.value),
+        onKeyDown: (e) => {
+          if (e.key === "Enter") register();
+        },
+        autoFocus: true
+      }
+    ), /* @__PURE__ */ React.createElement("div", { className: "hw-costumes" }, COSTUMES.map((c) => /* @__PURE__ */ React.createElement("button", { key: c, className: `hw-cos ${costumeDraft === c ? "on" : ""}`, onClick: () => setCostumeDraft(c) }, c))), /* @__PURE__ */ React.createElement("button", { className: "hw-btn hw-btn-block", disabled: !can, onClick: register }, "🎃 参加する"))));
+  }
+  const answered = myVote !== void 0 && !editing;
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-join" }, candyEvent && /* @__PURE__ */ React.createElement(CandyOverlay, { key: candyEvent.key, ev: candyEvent }), /* @__PURE__ */ React.createElement(ParticipantTop, { title: config.title, nickname, costume, candy: myCandy, onLeave }), /* @__PURE__ */ React.createElement("div", { className: "hw-join-body" }, config.ended ? /* @__PURE__ */ React.createElement(FinalRanking, { candy, mePid: pid }) : ai < 0 ? /* @__PURE__ */ React.createElement("div", { className: "hw-wait" }, /* @__PURE__ */ React.createElement("div", { className: "hw-bob" }, /* @__PURE__ */ React.createElement(GhostMascot, { size: 84 })), /* @__PURE__ */ React.createElement("p", { className: "hw-cheer" }, CHEERS[cheer]), /* @__PURE__ */ React.createElement("p", { className: "hw-h2" }, "まもなく開始🎃"), /* @__PURE__ */ React.createElement("p", { className: "hw-muted" }, "発表者が問いを出すまで待っててね")) : config.intermission ? /* @__PURE__ */ React.createElement(Interstitial, { nextNo: ai + 1, total: qs.length }) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "hw-qno-line" }, "Q.", String(ai + 1).padStart(2, "0"), " / ", String(qs.length).padStart(2, "0")), /* @__PURE__ */ React.createElement("h2", { className: "hw-qtext" }, q.text), answered ? /* @__PURE__ */ React.createElement("div", { className: "hw-answered" }, /* @__PURE__ */ React.createElement("div", { className: "hw-answered-label" }, "あなたの回答"), /* @__PURE__ */ React.createElement("div", { className: "hw-answered-val" }, answerToText(q, myVote)), /* @__PURE__ */ React.createElement("button", { className: "hw-link hw-link-edit", onClick: enterEdit }, "回答を修正する")) : /* @__PURE__ */ React.createElement(AnswerInput, { q, current: editing ? myVote : void 0, textDraft, setTextDraft, onSubmit: submit, onCancel: editing ? () => setEditing(false) : null }), config.revealResults && /* @__PURE__ */ React.createElement("div", { className: "hw-join-results" }, /* @__PURE__ */ React.createElement("div", { className: "hw-results-label" }, "みんなの回答（", votes.length, "）"), /* @__PURE__ */ React.createElement(Results, { q, votes })))));
+}
+function ParticipantTop({ title, nickname, costume, candy, onLeave }) {
+  return /* @__PURE__ */ React.createElement("header", { className: "hw-join-top" }, /* @__PURE__ */ React.createElement("span", { className: "hw-live hw-live-sm" }, /* @__PURE__ */ React.createElement("i", { className: "hw-dot" }), "LIVE"), /* @__PURE__ */ React.createElement("span", { className: "hw-join-title" }, title || "Trick or Survey"), nickname ? /* @__PURE__ */ React.createElement("span", { className: "hw-candy-badge" }, costume, " ", nickname, " · ", /* @__PURE__ */ React.createElement("b", null, candy), "🍬") : /* @__PURE__ */ React.createElement("span", null), /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onLeave }, "EXIT"));
+}
+function AnswerInput({ q, current, textDraft, setTextDraft, onSubmit, onCancel }) {
+  if (q.type === "choice") {
+    return /* @__PURE__ */ React.createElement("div", { className: "hw-choices" }, q.options.map((opt, i) => /* @__PURE__ */ React.createElement("button", { key: i, className: `hw-choice ${current === i ? "on" : ""}`, onClick: () => onSubmit(i) }, /* @__PURE__ */ React.createElement("span", { className: "hw-mark" }, String.fromCharCode(65 + i)), /* @__PURE__ */ React.createElement("span", { className: "hw-choice-t" }, opt))), onCancel && /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onCancel }, "キャンセル"));
+  }
+  if (q.type === "scale") {
+    const nums = [];
+    for (let n = q.scaleMin; n <= q.scaleMax; n++) nums.push(n);
+    return /* @__PURE__ */ React.createElement("div", { className: "hw-scale" }, /* @__PURE__ */ React.createElement("div", { className: "hw-scale-row" }, nums.map((n) => /* @__PURE__ */ React.createElement("button", { key: n, className: `hw-scalebtn ${current === n ? "on" : ""}`, onClick: () => onSubmit(n) }, n))), /* @__PURE__ */ React.createElement("div", { className: "hw-scale-ends" }, /* @__PURE__ */ React.createElement("span", null, q.minLabel), /* @__PURE__ */ React.createElement("span", null, q.maxLabel)), onCancel && /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onCancel }, "キャンセル"));
+  }
+  const can = textDraft.trim().length > 0;
+  return /* @__PURE__ */ React.createElement("div", { className: "hw-textans" }, /* @__PURE__ */ React.createElement("textarea", { className: "hw-input hw-textarea", rows: 3, placeholder: "自由に入力してね", value: textDraft, onChange: (e) => setTextDraft(e.target.value) }), /* @__PURE__ */ React.createElement("button", { className: "hw-btn hw-btn-block", disabled: !can, onClick: () => onSubmit(textDraft.trim()) }, "送信🍬"), onCancel && /* @__PURE__ */ React.createElement("button", { className: "hw-link", onClick: onCancel }, "キャンセル"));
+}
+function CandyOverlay({ ev }) {
+  const scare = ev.type === "scare";
+  const treat = ev.type === "treat";
+  const s = scare ? SCARES[ev.si] || SCARES[0] : null;
+  const rain = useMemo(() => {
+    let set, count;
+    if (scare) {
+      if (!s.rain) return [];
+      set = [s.rain];
+      count = s.cls === "s-super" ? 28 : 16;
+    } else if (treat) {
+      set = ["🍬", "🍭", "🍫", "🧁", "🍪"];
+      count = 26;
+    } else {
+      set = ["💨", "👻", "🦇"];
+      count = 14;
+    }
+    return Array.from({ length: count }, () => ({ left: Math.random() * 100, delay: Math.random() * 0.4, dur: (scare ? 0.8 : 1.1) + Math.random() * 0.9, e: set[Math.random() * set.length | 0], size: (scare ? 24 : 20) + Math.random() * 18 }));
+  }, []);
+  if (scare) {
+    return /* @__PURE__ */ React.createElement("div", { className: `hw-ov hw-ov-scare ${s.cls}` }, rain.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "hw-rain" }, rain.map((p, i) => /* @__PURE__ */ React.createElement("span", { key: i, className: "hw-drop", style: { left: `${p.left}%`, animationDelay: `${p.delay}s`, animationDuration: `${p.dur}s`, fontSize: `${p.size}px` } }, p.e))), /* @__PURE__ */ React.createElement("div", { className: "hw-scare" }, /* @__PURE__ */ React.createElement("div", { className: "hw-scare-face" }, s.face), /* @__PURE__ */ React.createElement("div", { className: "hw-scare-text" }, s.text), /* @__PURE__ */ React.createElement("div", { className: "hw-scare-sub" }, s.sub)));
+  }
+  return /* @__PURE__ */ React.createElement("div", { className: `hw-ov ${treat ? "hw-ov-treat" : "hw-ov-steal"}` }, /* @__PURE__ */ React.createElement("div", { className: "hw-rain" }, rain.map((p, i) => /* @__PURE__ */ React.createElement("span", { key: i, className: "hw-drop", style: { left: `${p.left}%`, animationDelay: `${p.delay}s`, animationDuration: `${p.dur}s`, fontSize: `${p.size}px` } }, p.e))), /* @__PURE__ */ React.createElement("div", { className: "hw-ov-burst" }, /* @__PURE__ */ React.createElement("div", { className: "hw-ov-emoji" }, treat ? "🍬" : "👻"), /* @__PURE__ */ React.createElement("div", { className: "hw-ov-text" }, treat ? "Trick or Treat!" : "お菓子を奪われた！"), /* @__PURE__ */ React.createElement("div", { className: `hw-ov-delta ${treat ? "plus" : "minus"}` }, treat ? `+${ev.delta}` : ev.delta, " 🍬")));
+}
+function Results({ q, votes, big }) {
+  if (q.type === "text") return /* @__PURE__ */ React.createElement(TextResults, { votes, big });
+  let labels = [];
+  if (q.type === "choice") labels = q.options.map((o, i) => ({ key: i, label: o }));
+  else for (let n = q.scaleMin; n <= q.scaleMax; n++) labels.push({ key: n, label: String(n) });
+  const counts = labels.map((l) => votes.filter((v) => v.a === l.key).length);
+  const total = votes.length || 0;
+  const maxC = Math.max(1, ...counts);
+  let avg = null;
+  if (q.type === "scale" && total > 0) avg = (votes.reduce((s, v) => s + Number(v.a), 0) / total).toFixed(2);
+  return /* @__PURE__ */ React.createElement("div", { className: `hw-results ${big ? "hw-results-big" : ""}` }, q.type === "scale" && /* @__PURE__ */ React.createElement("div", { className: "hw-avg" }, "平均 ", /* @__PURE__ */ React.createElement("b", null, avg != null ? avg : "—"), q.minLabel && /* @__PURE__ */ React.createElement("span", { className: "hw-avg-ends" }, q.minLabel, " … ", q.maxLabel)), labels.map((l, i) => {
+    const c = counts[i];
+    const pct = total ? Math.round(c / total * 100) : 0;
+    const names = votes.filter((v) => v.a === l.key).map((v) => (v.av ? v.av + " " : "") + v.n).filter((s) => s.trim());
+    return /* @__PURE__ */ React.createElement("div", { className: "hw-bar-row", key: l.key }, /* @__PURE__ */ React.createElement("div", { className: "hw-bar-main" }, /* @__PURE__ */ React.createElement("div", { className: "hw-bar-label" }, q.type === "choice" && /* @__PURE__ */ React.createElement("span", { className: "hw-mark hw-mark-sm" }, String.fromCharCode(65 + i)), /* @__PURE__ */ React.createElement("span", { className: "hw-bar-text" }, l.label)), /* @__PURE__ */ React.createElement("div", { className: "hw-bar-track" }, /* @__PURE__ */ React.createElement("div", { className: "hw-bar-fill", style: { width: `${total ? c / maxC * 100 : 0}%` } }), /* @__PURE__ */ React.createElement("span", { className: "hw-bar-val" }, pct, "%", /* @__PURE__ */ React.createElement("span", { className: "hw-bar-c" }, " (", c, ")")))), names.length > 0 && /* @__PURE__ */ React.createElement("div", { className: "hw-names" }, names.map((nm, k) => /* @__PURE__ */ React.createElement("span", { className: "hw-name-chip", key: k }, nm))));
+  }));
+}
+function TextResults({ votes, big }) {
+  if (!votes.length) return /* @__PURE__ */ React.createElement("div", { className: "hw-muted hw-text-empty" }, "まだ回答がありません");
+  return /* @__PURE__ */ React.createElement("div", { className: `hw-text-results ${big ? "hw-text-big" : ""}` }, [...votes].reverse().map((v, i) => /* @__PURE__ */ React.createElement("div", { className: "hw-text-card", key: i }, /* @__PURE__ */ React.createElement("span", { className: "hw-text-name" }, (v.av ? v.av + " " : "") + (v.n || "名無し")), /* @__PURE__ */ React.createElement("span", { className: "hw-text-body" }, String(v.a)))));
+}
+function StyleTag() {
+  return /* @__PURE__ */ React.createElement("style", null, `
+@import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Zen+Maru+Gothic:wght@400;500;700&display=swap');
+
+.hw-root{
+  --night1:#3a1a5e; --night2:#190a2e; --ink:#2A1A3E; --cream:#FFF6E9; --panel:#FFFDF7;
+  --pumpkin:#FF7A1A; --pumpkin-d:#E45C00; --purple:#9B5CFF; --purple-d:#6E35C9; --pink:#FF5FA2; --green:#8BE65C;
+  --muted:#8C7CA8; --line:#ECE3D8; --ghost:#F3EEFF; --mutedL:#D6C9EE;
+  --fd:'Baloo 2','Zen Maru Gothic',sans-serif; --fb:'Zen Maru Gothic','Baloo 2',system-ui,sans-serif;
+  font-family:var(--fb); color:var(--ghost);
+  min-height:100vh; -webkit-font-smoothing:antialiased;
+  background:radial-gradient(120% 90% at 50% -10%, #4a2570 0%, var(--night1) 38%, var(--night2) 100%);
+  background-attachment:fixed;
+}
+.hw-root *{box-sizing:border-box;}
+.hw-center{min-height:100vh;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;padding:24px;position:relative;z-index:2;}
+.hw-muted{color:var(--muted);} .hw-muted-l{color:var(--mutedL);font-size:13px;}
+.hw-page{max-width:1000px;margin:0 auto;padding:0 18px 50px;position:relative;z-index:2;}
+.hw-load{font-family:var(--fd);font-weight:700;letter-spacing:.2em;color:var(--mutedL);}
+
+/* decor */
+.hw-decor{position:fixed;inset:0;pointer-events:none;z-index:1;overflow:hidden;}
+.hw-moon{position:absolute;top:4%;right:6%;font-size:58px;filter:drop-shadow(0 0 22px rgba(255,220,140,.5));}
+.hw-star{position:absolute;color:#fff3c4;animation:hw-tw 2.4s ease-in-out infinite;opacity:.7;}
+@keyframes hw-tw{0%,100%{opacity:.25;transform:scale(.8);}50%{opacity:1;transform:scale(1.1);}}
+.hw-bat{position:absolute;left:-8%;font-size:26px;animation-name:hw-fly;animation-timing-function:linear;animation-iteration-count:infinite;}
+@keyframes hw-fly{from{transform:translateX(-10vw) translateY(0);}25%{transform:translateX(28vw) translateY(-26px);}50%{transform:translateX(56vw) translateY(10px);}75%{transform:translateX(84vw) translateY(-18px);}to{transform:translateX(118vw) translateY(0);}}
+.hw-ghostfloat{position:absolute;font-size:30px;opacity:.5;animation:hw-bob 3.4s ease-in-out infinite;}
+@keyframes hw-bob{0%,100%{transform:translateY(0) rotate(-3deg);}50%{transform:translateY(-16px) rotate(3deg);}}
+.hw-bob{animation:hw-bob 3s ease-in-out infinite;}
+.hw-mascot{display:block;filter:drop-shadow(0 8px 14px rgba(0,0,0,.35));}
+
+/* hero */
+.hw-hero{position:relative;z-index:2;max-width:560px;text-align:center;background:rgba(255,253,247,.0);}
+.hw-hero-ghost{display:inline-block;margin-bottom:6px;}
+.hw-eyebrow{font-family:var(--fd);font-weight:700;letter-spacing:.16em;font-size:12px;color:var(--pumpkin);}
+.hw-h1{font-family:var(--fd);font-weight:800;font-size:clamp(44px,11vw,76px);line-height:1;margin:6px 0 14px;color:#fff;text-shadow:0 4px 0 var(--purple-d),0 0 24px rgba(155,92,255,.5);}
+.hw-amp{color:var(--pumpkin);}
+.hw-lead{font-size:15px;line-height:1.8;color:var(--mutedL);max-width:42ch;margin:0 auto 22px;}
+.hw-saved{font-family:var(--fd);font-size:12px;color:var(--mutedL);margin-bottom:16px;}
+.hw-role-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;}
+@media(max-width:540px){.hw-role-row{grid-template-columns:1fr;}}
+.hw-role-card{position:relative;border:none;border-radius:22px;padding:22px 18px;cursor:pointer;color:#fff;display:flex;flex-direction:column;align-items:center;gap:4px;transition:transform .15s,box-shadow .15s;box-shadow:0 10px 0 rgba(0,0,0,.18);}
+.hw-role-card:hover{transform:translateY(-4px);}
+.hw-role-host{background:linear-gradient(160deg,#FF8C33,#E45C00);}
+.hw-role-guest{background:linear-gradient(160deg,#A66BFF,#6E35C9);}
+.hw-role-emoji{font-size:40px;}
+.hw-role-name{font-family:var(--fd);font-weight:800;font-size:22px;}
+.hw-role-desc{font-size:12px;opacity:.92;}
+.hw-fine{font-size:12px;color:var(--muted);line-height:1.7;margin:4px 0 0;}
+
+/* panel / bar */
+.hw-panel{background:var(--panel);color:var(--ink);border-radius:22px;padding:22px;box-shadow:0 18px 40px -18px rgba(0,0,0,.5);position:relative;z-index:2;}
+.hw-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 2px;margin-bottom:14px;position:relative;z-index:2;}
+.hw-bar-title{font-family:var(--fd);font-weight:800;font-size:18px;color:#fff;flex:1;text-align:center;}
+.hw-link{background:none;border:none;color:#fff;font-family:var(--fd);font-weight:700;font-size:14px;cursor:pointer;padding:6px 6px;}
+.hw-link:disabled{opacity:.5;cursor:default;}
+.hw-link:hover:not(:disabled){text-decoration:underline;}
+.hw-panel .hw-link{color:var(--purple-d);}
+.hw-link-edit{color:var(--pumpkin-d)!important;text-decoration:underline;}
+
+/* fields */
+.hw-field{display:block;margin-bottom:14px;}
+.hw-flabel{display:block;font-family:var(--fd);font-weight:700;font-size:11px;letter-spacing:.06em;color:var(--muted);margin-bottom:6px;}
+.hw-input{width:100%;background:#fff;border:2px solid var(--line);border-radius:14px;padding:12px 14px;font-family:var(--fb);font-size:15px;color:var(--ink);outline:none;transition:border-color .15s;}
+.hw-input:focus{border-color:var(--pumpkin);}
+.hw-input-lg{font-size:17px;padding:14px 16px;}
+.hw-input-num{width:80px;}
+.hw-textarea{resize:vertical;line-height:1.5;}
+
+/* setup list */
+.hw-qlist{display:flex;flex-direction:column;gap:9px;margin:6px 0 16px;}
+.hw-empty{padding:26px;text-align:center;color:var(--muted);border:2px dashed var(--line);border-radius:16px;font-size:14px;}
+.hw-qitem{display:flex;align-items:center;gap:14px;background:#fff;border:2px solid var(--line);border-radius:16px;padding:12px 14px;}
+.hw-qno{font-family:var(--fd);font-weight:800;color:var(--pumpkin);font-size:17px;min-width:30px;}
+.hw-qbody{flex:1;min-width:0;}
+.hw-qtxt{font-size:15px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hw-qmeta{font-family:var(--fd);font-size:11px;color:var(--muted);margin-top:2px;}
+.hw-qacts{display:flex;gap:5px;}
+.hw-ic{width:31px;height:31px;border:2px solid var(--line);background:#fff;border-radius:10px;cursor:pointer;color:var(--ink);font-size:13px;display:flex;align-items:center;justify-content:center;transition:.12s;}
+.hw-ic:hover:not(:disabled){border-color:var(--pumpkin);color:var(--pumpkin-d);}
+.hw-ic:disabled{opacity:.3;cursor:default;}
+.hw-ic-x:hover:not(:disabled){border-color:var(--pink);color:var(--pink);}
+.hw-add{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.hw-add-label{font-family:var(--fd);font-weight:700;font-size:12px;color:var(--muted);}
+.hw-chip{background:var(--ink);color:#fff;border:none;border-radius:999px;padding:9px 16px;font-family:var(--fd);font-weight:700;font-size:13px;cursor:pointer;transition:.14s;}
+.hw-chip:hover{background:var(--purple-d);}
+.hw-chip-ghost{background:#fff;color:var(--purple-d);border:2px solid var(--line);}
+.hw-editor{background:#fff;border:2px solid var(--pumpkin);border-radius:18px;padding:18px;margin:4px 0;}
+.hw-editor-type{font-family:var(--fd);font-weight:800;font-size:14px;color:var(--pumpkin-d);margin-bottom:10px;}
+.hw-opts{margin-top:12px;display:flex;flex-direction:column;gap:8px;}
+.hw-opt{display:flex;align-items:center;gap:8px;}
+.hw-mark{flex:none;width:28px;height:28px;border-radius:9px;background:var(--purple);color:#fff;font-family:var(--fd);font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;}
+.hw-mark-sm{width:22px;height:22px;font-size:11px;border-radius:7px;}
+.hw-scalecfg{margin-top:12px;}
+.hw-scalerange{display:flex;gap:20px;margin-bottom:12px;}
+.hw-scalerange label{font-family:var(--fd);font-weight:700;font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:5px;}
+.hw-editor-foot{display:flex;justify-content:space-between;align-items:center;margin-top:16px;}
+.hw-btn{background:linear-gradient(160deg,#FF9A3D,#E45C00);color:#fff;border:none;border-radius:14px;padding:13px 24px;font-family:var(--fd);font-weight:800;font-size:15px;cursor:pointer;box-shadow:0 6px 0 rgba(180,70,0,.35);transition:transform .1s,filter .15s;}
+.hw-btn:hover:not(:disabled){filter:brightness(1.05);}
+.hw-btn:active:not(:disabled){transform:translateY(3px);box-shadow:0 3px 0 rgba(180,70,0,.35);}
+.hw-btn:disabled{background:#d9cfc0;box-shadow:none;cursor:default;color:#fff;}
+.hw-btn-block{width:100%;margin-top:12px;padding:15px;}
+.hw-btn-xl{font-size:17px;padding:16px 30px;}
+.hw-startbar{margin-top:24px;padding-top:20px;border-top:2px dashed var(--line);text-align:center;}
+.hw-startbar .hw-fine{text-align:center;margin-top:10px;color:var(--muted);}
+
+/* presenter */
+.hw-stage-wrap{max-width:1180px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;padding:0 22px 16px;position:relative;z-index:2;}
+.hw-stage-top{display:flex;justify-content:space-between;align-items:center;padding:16px 0;}
+.hw-st-left{display:flex;align-items:center;gap:14px;}
+.hw-live{display:inline-flex;align-items:center;gap:7px;background:var(--pink);color:#fff;font-family:var(--fd);font-weight:800;letter-spacing:.1em;font-size:12px;padding:5px 11px;border-radius:999px;}
+.hw-live-sm{font-size:10px;padding:3px 8px;}
+.hw-dot{width:7px;height:7px;border-radius:50%;background:#fff;animation:hw-pulse 1.3s infinite;}
+@keyframes hw-pulse{0%,100%{opacity:1;}50%{opacity:.25;}}
+.hw-st-q{font-family:var(--fd);font-weight:700;font-size:16px;color:var(--mutedL);}
+.hw-st-q b{color:#fff;font-size:20px;}
+.hw-slash{opacity:.5;margin:0 3px;}
+.hw-st-right{display:flex;align-items:center;gap:14px;}
+.hw-resp{font-family:var(--fd);font-weight:700;font-size:14px;color:var(--mutedL);}
+.hw-resp b{color:var(--pumpkin);font-size:19px;}
+.hw-stage{flex:1;display:flex;flex-direction:column;justify-content:center;padding:18px 0;}
+.hw-stage-q{background:var(--panel);color:var(--ink);border-radius:24px;padding:30px 30px 26px;box-shadow:0 22px 50px -24px rgba(0,0,0,.6);animation:hw-pop .45s cubic-bezier(.2,1.2,.3,1);}
+@keyframes hw-pop{from{transform:translateY(16px) scale(.98);opacity:0;}to{transform:none;opacity:1;}}
+.hw-stage-qtext{font-family:var(--fd);font-weight:800;font-size:clamp(24px,4vw,40px);line-height:1.25;margin-bottom:26px;color:var(--ink);}
+.hw-candybar{margin:4px 0 10px;}
+.hw-controls{display:flex;align-items:center;gap:12px;padding-top:12px;}
+.hw-ctrl{flex:none;background:var(--panel);color:var(--ink);border:none;border-radius:14px;padding:13px 22px;font-family:var(--fd);font-weight:800;font-size:15px;cursor:pointer;box-shadow:0 6px 0 rgba(0,0,0,.22);transition:transform .1s;}
+.hw-ctrl:active:not(:disabled){transform:translateY(3px);box-shadow:0 3px 0 rgba(0,0,0,.22);}
+.hw-ctrl:disabled{opacity:.4;cursor:default;}
+.hw-ctrl-toggle{flex:1;font-size:13px;color:var(--purple-d);background:rgba(255,253,247,.85);}
+.hw-ctrl-go{background:linear-gradient(160deg,#FF9A3D,#E45C00);color:#fff;margin-left:auto;box-shadow:0 6px 0 rgba(180,70,0,.4);}
+.hw-ctrl-end{background:linear-gradient(160deg,#A66BFF,#6E35C9);color:#fff;margin-left:auto;box-shadow:0 6px 0 rgba(70,30,130,.4);}
+
+/* standby */
+.hw-standby{background:var(--panel);color:var(--ink);border-radius:24px;padding:26px;box-shadow:0 22px 50px -24px rgba(0,0,0,.6);}
+.hw-standby-msg{display:flex;gap:18px;align-items:center;margin-bottom:20px;}
+.hw-h2{font-family:var(--fd);font-weight:800;font-size:clamp(18px,2.6vw,24px);margin:2px 0 4px;}
+.hw-standby-cols{display:grid;grid-template-columns:1.3fr 1fr;gap:18px;}
+@media(max-width:760px){.hw-standby-cols{grid-template-columns:1fr;}}
+.hw-lineup{display:flex;flex-direction:column;gap:9px;}
+.hw-lineup-item{display:flex;align-items:center;gap:13px;text-align:left;background:#fff;border:2px solid var(--line);border-radius:14px;padding:12px 14px;cursor:pointer;transition:.14s;}
+.hw-lineup-item:hover{border-color:var(--pumpkin);transform:translateX(3px);}
+.hw-lineup-text{flex:1;font-weight:500;}
+.hw-lineup-type{font-family:var(--fd);font-size:11px;color:var(--muted);}
+.hw-rank-panel{background:#fbf3ff;border:2px solid #efe2ff;border-radius:16px;padding:14px;}
+.hw-rank-title{font-family:var(--fd);font-weight:800;color:var(--purple-d);margin-bottom:10px;}
+.hw-rank-list{display:flex;flex-direction:column;gap:7px;}
+.hw-rank-row{display:flex;align-items:center;gap:10px;font-size:14px;}
+.hw-rank-no{font-family:var(--fd);font-weight:800;color:var(--muted);width:20px;}
+.hw-rank-av{font-size:18px;}
+.hw-rank-name{flex:1;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hw-rank-c{font-family:var(--fd);font-weight:800;color:var(--pumpkin-d);}
+.hw-rank-empty{color:var(--muted);font-size:13px;padding:6px 0;}
+.hw-rank-compact{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;}
+.hw-rank-chip{background:rgba(255,253,247,.9);color:var(--ink);border-radius:999px;padding:5px 12px;font-size:13px;font-weight:500;}
+.hw-rank-chip b{font-family:var(--fd);color:var(--pumpkin-d);margin-left:5px;}
+
+/* interstitial */
+.hw-inter{background:var(--panel);color:var(--ink);border-radius:24px;padding:40px 24px;text-align:center;box-shadow:0 22px 50px -24px rgba(0,0,0,.6);}
+.hw-cauldron{position:relative;height:70px;margin-bottom:10px;}
+.hw-cauldron-pot{font-size:52px;display:inline-block;animation:hw-bob 2.4s ease-in-out infinite;}
+.hw-bubble{position:absolute;left:50%;bottom:30px;width:12px;height:12px;border-radius:50%;background:var(--green);opacity:0;animation:hw-bub 1.8s ease-in infinite;}
+.hw-bubble.b1{margin-left:-20px;} .hw-bubble.b2{margin-left:4px;animation-delay:.6s;} .hw-bubble.b3{margin-left:20px;animation-delay:1.1s;}
+@keyframes hw-bub{0%{opacity:0;transform:translateY(0) scale(.6);}30%{opacity:.9;}100%{opacity:0;transform:translateY(-46px) scale(1.1);}}
+.hw-inter-no{font-family:var(--fd);font-weight:800;font-size:clamp(40px,12vw,62px);color:var(--pumpkin-d);}
+.hw-inter-no span{font-size:18px;color:var(--muted);}
+.hw-inter-msg{font-family:var(--fd);font-weight:700;font-size:18px;margin:4px 0 2px;}
+.hw-dots{display:flex;gap:7px;justify-content:center;margin-top:12px;}
+.hw-dots i{width:8px;height:8px;border-radius:50%;background:var(--purple);animation:hw-dot 1.2s infinite;}
+.hw-dots i:nth-child(2){animation-delay:.2s;}.hw-dots i:nth-child(3){animation-delay:.4s;}
+@keyframes hw-dot{0%,100%{opacity:.25;transform:translateY(0);}50%{opacity:1;transform:translateY(-5px);}}
+
+/* participant */
+.hw-join{max-width:560px;margin:0 auto;min-height:100vh;position:relative;z-index:2;}
+.hw-join-top{display:flex;align-items:center;gap:10px;padding:14px 16px;}
+.hw-join-title{flex:1;font-family:var(--fd);font-weight:700;font-size:14px;color:#fff;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hw-candy-badge{background:rgba(255,253,247,.92);color:var(--ink);border-radius:999px;padding:4px 11px;font-size:12px;font-weight:500;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis;}
+.hw-candy-badge b{font-family:var(--fd);color:var(--pumpkin-d);}
+.hw-join-body{padding:8px 16px 50px;}
+.hw-wait{text-align:center;padding:20px 0 30px;}
+.hw-cheer{font-family:var(--fd);font-weight:800;font-size:22px;color:var(--pumpkin);margin:16px 0 6px;animation:hw-fade .5s;}
+@keyframes hw-fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;}}
+.hw-qno-line{font-family:var(--fd);font-weight:700;font-size:12px;color:var(--mutedL);margin:12px 0 10px;}
+.hw-qtext{font-family:var(--fd);font-weight:800;font-size:clamp(20px,5.4vw,26px);line-height:1.35;margin:0 0 20px;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,.3);}
+.hw-choices{display:flex;flex-direction:column;gap:10px;}
+.hw-choice{display:flex;align-items:center;gap:12px;text-align:left;background:var(--panel);border:2.5px solid transparent;border-radius:16px;padding:15px 16px;font-family:var(--fb);font-size:16px;font-weight:500;color:var(--ink);cursor:pointer;transition:.14s;box-shadow:0 5px 0 rgba(0,0,0,.14);}
+.hw-choice:active{transform:translateY(2px);box-shadow:0 3px 0 rgba(0,0,0,.14);}
+.hw-choice.on{border-color:var(--pumpkin);}
+.hw-choice-t{flex:1;}
+.hw-scale-row{display:flex;gap:8px;}
+.hw-scalebtn{flex:1;aspect-ratio:1;background:var(--panel);border:2.5px solid transparent;border-radius:14px;font-family:var(--fd);font-weight:800;font-size:20px;color:var(--ink);cursor:pointer;transition:.14s;box-shadow:0 5px 0 rgba(0,0,0,.14);}
+.hw-scalebtn:active{transform:translateY(2px);box-shadow:0 3px 0 rgba(0,0,0,.14);}
+.hw-scalebtn.on{border-color:var(--pumpkin);}
+.hw-scale-ends{display:flex;justify-content:space-between;margin-top:8px;font-size:12px;color:var(--mutedL);}
+.hw-textans{margin-top:2px;}
+.hw-answered{background:var(--panel);color:var(--ink);border-radius:16px;padding:18px;box-shadow:0 5px 0 rgba(0,0,0,.14);}
+.hw-answered-label{font-family:var(--fd);font-weight:700;font-size:11px;color:var(--muted);margin-bottom:7px;}
+.hw-answered-val{font-size:18px;line-height:1.5;white-space:pre-wrap;word-break:break-word;margin-bottom:10px;}
+.hw-join-results{margin-top:28px;padding-top:18px;border-top:2px dashed rgba(255,255,255,.25);}
+.hw-results-label{font-family:var(--fd);font-weight:700;font-size:12px;color:var(--mutedL);margin-bottom:12px;}
+
+/* check-in */
+.hw-reg{text-align:center;padding:16px 0 40px;}
+.hw-reg-av{font-size:64px;margin:8px 0 14px;animation:hw-bob 3s ease-in-out infinite;}
+.hw-reg-input{text-align:center;margin-bottom:14px;}
+.hw-costumes{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:6px;}
+.hw-cos{aspect-ratio:1;font-size:28px;background:var(--panel);border:2.5px solid transparent;border-radius:14px;cursor:pointer;transition:.12s;box-shadow:0 4px 0 rgba(0,0,0,.14);}
+.hw-cos:hover{transform:translateY(-2px);}
+.hw-cos.on{border-color:var(--pumpkin);background:#fff2e2;}
+
+/* results bars */
+.hw-results{display:flex;flex-direction:column;gap:12px;}
+.hw-bar-row{display:flex;flex-direction:column;gap:6px;}
+.hw-bar-main{display:flex;align-items:center;gap:13px;}
+.hw-bar-label{display:flex;align-items:center;gap:8px;width:30%;max-width:240px;min-width:80px;}
+.hw-bar-text{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hw-results-big .hw-bar-text{font-size:18px;}
+.hw-bar-track{flex:1;position:relative;height:34px;background:#efe6f7;border-radius:999px;overflow:hidden;display:flex;align-items:center;}
+.hw-results-big .hw-bar-track{height:46px;}
+.hw-bar-fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--pumpkin),#ffb259);border-radius:999px;transition:width .6s cubic-bezier(.2,.8,.2,1);}
+.hw-bar-val{position:relative;margin-left:auto;padding:0 13px;font-family:var(--fd);font-weight:800;font-size:15px;color:var(--ink);font-variant-numeric:tabular-nums;}
+.hw-results-big .hw-bar-val{font-size:20px;}
+.hw-bar-c{color:var(--muted);font-size:.8em;}
+.hw-avg{font-family:var(--fd);font-weight:700;font-size:14px;color:var(--muted);margin-bottom:6px;display:flex;align-items:baseline;gap:8px;}
+.hw-avg b{color:var(--pumpkin-d);font-size:28px;}
+.hw-avg-ends{font-family:var(--fb);font-weight:500;font-size:12px;}
+.hw-names{display:flex;flex-wrap:wrap;gap:5px;padding-left:calc(30% + 13px);}
+.hw-results-big .hw-names{padding-left:0;}
+.hw-name-chip{background:#f3ecfb;border:1px solid #e7dcf7;color:#6a5a86;font-size:12px;padding:2px 9px;border-radius:999px;}
+.hw-text-results{display:flex;flex-direction:column;gap:10px;max-height:48vh;overflow:auto;}
+.hw-text-big{max-height:54vh;}
+.hw-text-card{background:var(--panel);color:var(--ink);border-radius:14px;border-left:4px solid var(--pumpkin);padding:12px 15px;font-size:15px;line-height:1.55;white-space:pre-wrap;word-break:break-word;}
+.hw-text-big .hw-text-card{font-size:18px;}
+.hw-text-name{display:block;font-family:var(--fd);font-weight:700;font-size:12px;color:var(--purple-d);margin-bottom:4px;}
+.hw-text-empty{padding:24px 0;color:var(--mutedL);}
+
+/* candy overlays */
+.hw-ov{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;pointer-events:none;overflow:hidden;}
+.hw-ov-treat{background:radial-gradient(circle,rgba(255,180,90,.22),transparent 60%);}
+.hw-ov-steal{background:radial-gradient(circle,rgba(110,53,201,.25),transparent 60%);}
+.hw-rain{position:absolute;inset:0;}
+.hw-drop{position:absolute;top:-10%;animation-name:hw-drop;animation-timing-function:cubic-bezier(.3,.1,.6,1);animation-fill-mode:both;}
+@keyframes hw-drop{0%{transform:translateY(-10vh) rotate(0);opacity:1;}100%{transform:translateY(112vh) rotate(260deg);opacity:.95;}}
+.hw-ov-burst{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;gap:6px;animation:hw-burst .5s cubic-bezier(.2,1.5,.4,1) both;}
+@keyframes hw-burst{0%{transform:scale(.3);opacity:0;}60%{transform:scale(1.12);opacity:1;}100%{transform:scale(1);}}
+.hw-ov-emoji{font-size:72px;filter:drop-shadow(0 8px 14px rgba(0,0,0,.4));}
+.hw-ov-text{font-family:var(--fd);font-weight:800;font-size:clamp(26px,7vw,42px);color:#fff;text-shadow:0 3px 0 var(--pumpkin-d),0 0 20px rgba(0,0,0,.4);}
+.hw-ov-delta{font-family:var(--fd);font-weight:800;font-size:26px;padding:4px 16px;border-radius:999px;color:#fff;}
+.hw-ov-delta.plus{background:var(--green);color:#1c4d12;}
+.hw-ov-delta.minus{background:var(--purple-d);}
+
+/* scare */
+.hw-ov-scare{background:rgba(10,4,20,.55);animation:hw-shake .5s;}
+@keyframes hw-shake{0%,100%{transform:translate(0,0);}20%{transform:translate(-10px,6px);}40%{transform:translate(9px,-6px);}60%{transform:translate(-7px,-4px);}80%{transform:translate(6px,5px);}}
+.hw-scare{text-align:center;animation:hw-zoom .35s cubic-bezier(.2,1.6,.4,1) both;}
+@keyframes hw-zoom{0%{transform:scale(.1);opacity:0;}70%{transform:scale(1.15);opacity:1;}100%{transform:scale(1);}}
+.hw-scare-face{font-size:clamp(120px,40vw,220px);filter:drop-shadow(0 0 30px rgba(155,92,255,.7));animation:hw-wob .4s ease-in-out 2;}
+@keyframes hw-wob{0%,100%{transform:rotate(-6deg);}50%{transform:rotate(6deg);}}
+.hw-scare-text{font-family:var(--fd);font-weight:800;font-size:clamp(46px,16vw,110px);color:#fff;text-shadow:0 4px 0 var(--purple-d);letter-spacing:.04em;}
+.hw-scare-sub{font-family:var(--fd);font-weight:700;font-size:16px;color:var(--mutedL);margin-top:2px;}
+/* 脅かしバリエーション */
+.hw-ov-scare.s-spider{background:rgba(8,10,4,.7);}
+.hw-ov-scare.s-zombie{background:rgba(6,22,8,.72);}
+.hw-ov-scare.s-eyes{background:rgba(4,4,20,.82);}
+.hw-ov-scare.s-skull{background:rgba(6,6,10,.9);}
+.hw-ov-scare.s-skull .hw-scare-face{filter:drop-shadow(0 0 26px rgba(255,255,255,.35));}
+.hw-ov-scare.s-blood{background:rgba(70,0,0,.68);animation:hw-shake .5s;}
+.hw-ov-scare.s-blood .hw-scare-text{color:#ff2a2a;text-shadow:0 4px 0 #5a0000,0 0 26px rgba(255,0,0,.6);}
+.hw-ov-scare.s-blood::after{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(120% 90% at 50% -20%, transparent 40%, rgba(120,0,0,.55) 100%);}
+/* 最恐：赤フラッシュ＋激しい揺れ */
+.hw-ov-scare.s-super{animation:hw-flash .16s steps(1) 6, hw-quake .5s 2;}
+@keyframes hw-flash{0%{background:rgba(150,0,0,.85);}50%{background:rgba(10,0,0,.92);}100%{background:rgba(150,0,0,.85);}}
+@keyframes hw-quake{0%,100%{transform:translate(0,0) rotate(0);}10%{transform:translate(-16px,10px) rotate(-1.5deg);}30%{transform:translate(14px,-12px) rotate(1.5deg);}50%{transform:translate(-14px,-8px) rotate(-1deg);}70%{transform:translate(12px,10px) rotate(1deg);}90%{transform:translate(-8px,6px) rotate(0);}}
+.hw-ov-scare.s-super .hw-scare-face{font-size:clamp(150px,52vw,300px);filter:drop-shadow(0 0 40px rgba(255,0,0,.8));animation:hw-wob .22s ease-in-out 4;}
+.hw-ov-scare.s-super .hw-scare-text{color:#ff1a1a;text-shadow:0 5px 0 #4a0000,0 0 30px rgba(255,0,0,.8);font-size:clamp(52px,18vw,130px);}
+.hw-ov-scare.s-super .hw-scare-sub{color:#ffb3b3;font-size:19px;}
+
+/* 最終ランキング */
+.hw-final{background:var(--panel);color:var(--ink);border-radius:24px;padding:24px 22px 26px;box-shadow:0 22px 50px -24px rgba(0,0,0,.6);animation:hw-pop .5s cubic-bezier(.2,1.2,.3,1);}
+.hw-final-head{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:18px;}
+.hw-final-crown{font-size:30px;animation:hw-bob 2.6s ease-in-out infinite;}
+.hw-final-pumpkin{font-size:28px;}
+.hw-final-title{font-family:var(--fd);font-weight:800;font-size:clamp(20px,3.4vw,30px);color:var(--ink);margin:0;}
+.hw-podium{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:end;max-width:560px;margin:0 auto 10px;}
+.hw-podium-col{display:flex;flex-direction:column;align-items:center;gap:4px;}
+.hw-podium-col.empty{visibility:hidden;}
+.hw-podium-crown{font-size:28px;animation:hw-bob 2.2s ease-in-out infinite;}
+.hw-podium-av{font-size:clamp(30px,7vw,46px);}
+.hw-podium-name{font-family:var(--fd);font-weight:700;font-size:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hw-podium-bar{width:100%;border-radius:14px 14px 0 0;display:flex;align-items:flex-start;justify-content:center;padding-top:8px;color:#fff;font-family:var(--fd);font-weight:800;font-size:22px;box-shadow:inset 0 -6px 0 rgba(0,0,0,.12);}
+.hw-podium-col.r1 .hw-podium-bar{height:120px;background:linear-gradient(180deg,#FFD23D,#F0A500);}
+.hw-podium-col.r2 .hw-podium-bar{height:88px;background:linear-gradient(180deg,#Cfd6de,#9aa6b2);}
+.hw-podium-col.r3 .hw-podium-bar{height:66px;background:linear-gradient(180deg,#E6A463,#bd7636);}
+.hw-podium-c{font-family:var(--fd);font-weight:800;color:var(--pumpkin-d);margin-top:4px;}
+.hw-podium-col.me .hw-podium-name{color:var(--pumpkin-d);}
+.hw-final-rest{max-width:460px;margin:12px auto 0;}
+.hw-final-me{max-width:460px;margin:14px auto 0;text-align:center;background:#fff2e2;border:2px solid #ffd9b0;border-radius:14px;padding:10px 14px;font-family:var(--fd);font-weight:700;color:var(--ink);}
+.hw-final-me b{color:var(--pumpkin-d);font-size:1.2em;}
+.hw-rank-row.me{background:#fff2e2;border-radius:10px;}
+.hw-rank-row.top .hw-rank-no{font-size:18px;}
+
+@media (prefers-reduced-motion: reduce){
+  .hw-root *{animation:none!important;transition:none!important;}
+  .hw-drop,.hw-bat,.hw-ghostfloat,.hw-star{display:none;}
+}
+    `);
+}
+const __root = ReactDOM.createRoot(document.getElementById("root"));
+__root.render(/* @__PURE__ */ React.createElement(App, null));
+
+</script>
+</body>
+</html>
